@@ -12,9 +12,11 @@ Esse download contém fontes; não contém um VST3 Windows compilado.
 
 Projeto em desenvolvimento: núcleo offline C++17, integração Rubber Band 3.3.0,
 wrapper/editor JUCE 8.0.6, CMake e script Windows Release x64. O núcleo passou
-nos nove testes automatizados Linux em Release e com ASan/UBSan. Isso não aprova
-o produto para uso em DAW: o binário Windows e os testes Studio One continuam
-pendentes. Veja o [relatório atual](docs/RESULTADOS.md).
+nos nove testes automatizados Linux em Release e com ASan/UBSan. O usuário também
+compilou o VST3 Windows x64 com MSVC e forneceu um log com 10/10 testes aprovados.
+O artefato está no PC Windows do usuário; não foi transferido para este ambiente.
+Validação VST3 externa e testes no Studio One continuam pendentes. Veja o
+[relatório atual](docs/RESULTADOS.md).
 
 - [Auditoria do ambiente](docs/AUDITORIA.md)
 - [Arquitetura técnica e contratos de classes](docs/ARQUITETURA.md)

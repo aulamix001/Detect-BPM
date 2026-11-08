@@ -2,6 +2,30 @@
 
 Data: 2026-11-08. **Candidato em desenvolvimento; versão 0.1 não aprovada.**
 
+## Atualização: build no PC Windows do usuário
+
+O usuário forneceu a saída completa de conclusão do script PowerShell:
+
+- MSVC 19.44.35229.0 e Windows SDK 10.0.26100.0, alvo x64.
+- Bundle gerado em
+  `build/windows/SmartTime_artefacts/Release/VST3/SMART TIME.vst3`.
+- Módulo interno Windows em `Contents/x86_64-win/SMART TIME.vst3` e geração de
+  `Contents/Resources/moduleinfo.json` concluídos.
+- CTest: **10/10 testes passaram**, incluindo `core_render`, `core_stereo`,
+  `core_cancel` e `plugin_lifecycle`; tempo total reportado de 3,50 segundos.
+- O modo `-BuildOnly` terminou exibindo `VST3 candidato gerado`.
+
+Essa evidência foi recebida do PC do usuário; os comandos não foram executados
+pelo agente num Windows remoto. O bundle Windows não foi transferido para o
+executor Linux nem publicado como download binário. O ZIP do GitHub continua
+sendo um pacote de fontes.
+
+O resultado supera o bloqueio anterior de obtenção do JUCE no PC Windows.
+Nenhuma alteração na forma de download das dependências foi necessária depois
+do relato de sucesso. Validador VST3 externo, testes no Studio One e avaliação
+musical de gravações reais continuam pendentes. Os resultados Linux e as
+tentativas anteriores documentados abaixo são o histórico da preparação.
+
 ## Entregas presentes
 
 | Caminho | Conteúdo |
