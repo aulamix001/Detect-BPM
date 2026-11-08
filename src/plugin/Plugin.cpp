@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "../ui/Theme.h"
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <array>
 #include <condition_variable>
@@ -254,7 +255,9 @@ private:
 class Editor final : public AudioProcessorEditor,private Timer {
 public:
     explicit Editor(Processor& processor) : AudioProcessorEditor(processor),p(processor) {
-        for(auto* b:{&open,&detect,&render,&play,&stop,&exportWav,&cancel,&future}){addAndMakeVisible(b);b->setColour(TextButton::buttonColourId,Colour(0xff382a18));b->setColour(TextButton::textColourOffId,gold);}
+        setLookAndFeel(&look);
+        for(auto* b:{&open,&detect,&render,&play,&stop,&exportWav,&cancel,&future})addAndMakeVisible(b);
+        render.getProperties().set("primary",true);exportWav.getProperties().set("primary",true);
         future.setEnabled(false);
         open.onClick=[this]{choose(false);};detect.onClick=[this]{p.analyseFile();};render.onClick=[this]{p.renderFile();};
         play.onClick=[this]{p.preview();};stop.onClick=[this]{p.stopPreview();};cancel.onClick=[this]{p.cancel();};exportWav.onClick=[this]{choose(true);};
@@ -266,17 +269,17 @@ public:
         const std::array<const char*,6> labels{"BPM fixo","Intensidade %","Naturalidade %","Swing %","Origem ms","Compasso n/4"};
         for(std::size_t i=0;i<knobs.size();++i) {
             addAndMakeVisible(knobs[i]);knobs[i].setSliderStyle(Slider::RotaryHorizontalVerticalDrag);knobs[i].setTextBoxStyle(Slider::TextBoxBelow,false,80,20);
-            knobs[i].setColour(Slider::rotarySliderFillColourId,gold);knobs[i].setColour(Slider::thumbColourId,Colour(0xffd7c4a0));
-            addAndMakeVisible(names[i]);names[i].setText(labels[i],dontSendNotification);names[i].setJustificationType(Justification::centred);names[i].setColour(Label::textColourId,gold);
+            
+            addAndMakeVisible(names[i]);names[i].setText(labels[i],dontSendNotification);names[i].setJustificationType(Justification::centred);names[i].setColour(Label::textColourId,chi::Theme::muted);
             attachments[i]=std::make_unique<SliderAttachment>(p.params,ids[i],knobs[i]);
         }
         addAndMakeVisible(grid);grid.addItemList({"1/4","1/8","1/16","1/32"},1);
         addAndMakeVisible(source);source.addItemList({"BPM fixo","BPM detectado","BPM da DAW"},1);
         gridAttach=std::make_unique<ComboAttachment>(p.params,"grid",grid);sourceAttach=std::make_unique<ComboAttachment>(p.params,"source",source);
-        addAndMakeVisible(status);status.setColour(Label::textColourId,gold);
+        addAndMakeVisible(status);status.setColour(Label::textColourId,chi::Theme::muted);
         setResizable(true,true);setResizeLimits(900,680,1500,1000);setSize(1050,700);startTimerHz(20);
     }
-    ~Editor() override {stopTimer();}
+    ~Editor() override {stopTimer();setLookAndFeel(nullptr);}
     void resized() override {
         auto r=getLocalBounds().reduced(30);r.removeFromTop(110);
         auto buttons=r.removeFromTop(34);
@@ -289,13 +292,13 @@ public:
         status.setBounds(r);
     }
     void paint(Graphics& g) override {
-        g.fillAll(Colour(0xff422313));g.setColour(Colour(0xff171615));g.fillRoundedRectangle(getLocalBounds().reduced(18).toFloat(),12);
-        g.setColour(gold);g.drawRoundedRectangle(getLocalBounds().reduced(22).toFloat(),10,1.5f);
-        g.setFont(FontOptions(32,Font::bold));g.drawText("CHi",0,30,getWidth(),36,Justification::centred);
+        g.fillAll(chi::Theme::background);g.setColour(chi::Theme::panel);g.fillRoundedRectangle(getLocalBounds().reduced(18).toFloat(),12);
+        g.setColour(chi::Theme::border);g.drawRoundedRectangle(getLocalBounds().reduced(18).toFloat(),chi::Theme::radius,1);
+        g.setColour(chi::Theme::text);g.setFont(FontOptions(32,Font::bold));g.drawText("CHi",0,30,getWidth(),36,Justification::centred);
         g.setFont(FontOptions(25,Font::italic));g.drawText("SMART TIME",0,66,getWidth(),30,Justification::centred);
         g.setFont(FontOptions(12));g.drawText("INTELLIGENT TIME CORRECTION  |  0.1.0 - DEVELOPMENT",0,98,getWidth(),20,Justification::centred);
         meter(g,{40,45,160,60},inPeak,"IN");meter(g,{getWidth()-200,45,160,60},outPeak,"OUT");
-        g.setColour(Colours::black);g.fillRect(wave);g.setColour(gold);g.drawRect(wave);
+        g.setColour(chi::Theme::well);g.fillRect(wave);g.setColour(chi::Theme::accent);g.drawRect(wave);
         const auto clip=p.useB&&snap.corrected&&snap.renderVersion==p.version.load()?snap.corrected:snap.original;
         if(!clip)return;
         const double frames=static_cast<double>(clip->frames());
@@ -305,14 +308,14 @@ public:
         const auto maxLines=static_cast<std::size_t>(frames/step)+3;
         for(std::size_t i=0;i<std::min<std::size_t>(maxLines,5000);++i){const double frame=s.offsetSeconds*clip->sampleRate+(i+(i%2?s.swing:0))*step;
             const int x=wave.getX()+static_cast<int>(frame/frames*wave.getWidth());if(x<wave.getX()||x>wave.getRight())continue;
-            g.setColour(gold.withAlpha(i%(s.subdivision*s.beatsPerBar/4)==0?.65f:.2f));g.drawVerticalLine(x,static_cast<float>(wave.getY()),static_cast<float>(wave.getBottom()));}
-        g.setColour(Colour(0xffffad35));
+            g.setColour(chi::Theme::accent.withAlpha(i%(s.subdivision*s.beatsPerBar/4)==0?.65f:.2f));g.drawVerticalLine(x,static_cast<float>(wave.getY()),static_cast<float>(wave.getBottom()));}
+        g.setColour(chi::Theme::accent);
         const auto peaks=p.useB&&snap.correctedPeaks&&snap.renderVersion==p.version.load()?snap.correctedPeaks:snap.originalPeaks;
         if(!peaks)return;
         for(int x=0;x<wave.getWidth();++x){const auto begin=static_cast<std::size_t>(x)*peaks->size()/wave.getWidth(),end=std::min(peaks->size(),static_cast<std::size_t>(x+1)*peaks->size()/wave.getWidth()+1);
             float peak=0;for(auto j=begin;j<end;++j)peak=std::max(peak,(*peaks)[j]);
             const float y=static_cast<float>(wave.getCentreY()),h=std::min(1.0f,peak)*wave.getHeight()*.43f;g.drawVerticalLine(wave.getX()+x,y-h,y+h);}
-        g.setColour(Colours::orangered);for(const auto& a:snap.analysis.attacks){auto frame=a.frame;if(p.useB){const auto it=snap.map.find(frame);if(it!=snap.map.end())frame=it->second;}
+        g.setColour(chi::Theme::clip);for(const auto& a:snap.analysis.attacks){auto frame=a.frame;if(p.useB){const auto it=snap.map.find(frame);if(it!=snap.map.end())frame=it->second;}
             const int x=wave.getX()+static_cast<int>(frame/frames*wave.getWidth());g.fillRect(x,wave.getY()+2,2,12);}
     }
 private:
@@ -334,12 +337,12 @@ private:
         chooser->launchAsync(save?(FileBrowserComponent::saveMode|FileBrowserComponent::canSelectFiles|FileBrowserComponent::warnAboutOverwriting):(FileBrowserComponent::openMode|FileBrowserComponent::canSelectFiles),[safe,save](const FileChooser& fc){if(safe){const auto file=fc.getResult();if(file!=File{}){if(save)safe->p.exportFile(file);else safe->p.importFile(file);}}});
     }
     static void meter(Graphics& g,Rectangle<int> box,float peak,const char* name) {
-        g.setColour(Colour(0xffddaf65));g.fillRoundedRectangle(box.toFloat(),5);g.setColour(Colours::black);g.setFont(FontOptions(12));g.drawText(name,box.removeFromBottom(18),Justification::centred);
+        g.setColour(chi::Theme::well);g.fillRoundedRectangle(box.toFloat(),5);g.setColour(chi::Theme::text);g.setFont(FontOptions(12));g.drawText(name,box.removeFromBottom(18),Justification::centred);
         const auto center=box.getBottomLeft().toFloat()+Point<float>(box.getWidth()*.5f,0);
         const float angle=-2.8f+std::clamp((Decibels::gainToDecibels(peak,-60.0f)+60)/60,0.0f,1.0f)*2.45f;
-        g.setColour(Colour(0xff8b250b));g.drawLine(center.x,center.y,center.x+std::cos(angle)*box.getWidth()*.4f,center.y+std::sin(angle)*box.getHeight()*.9f,2);
+        g.setColour(chi::Theme::needle);g.drawLine(center.x,center.y,center.x+std::cos(angle)*box.getWidth()*.4f,center.y+std::sin(angle)*box.getHeight()*.9f,2);
     }
-    Processor& p;Snapshot snap;Colour gold{0xffcaa567};Rectangle<int> wave;float inPeak=0,outPeak=0;
+    Processor& p;Snapshot snap;chi::SmartLookAndFeel look;Rectangle<int> wave;float inPeak=0,outPeak=0;
     TextButton open{"Abrir WAV"},detect{"Detectar BPM"},render{"Corrigir"},play{"Play"},stop{"Stop"},exportWav{"Exportar WAV"},cancel{"Cancelar"},future{"Tempo real - futuro"};
     ToggleButton ab,pitch,protect;ComboBox grid,source;Label status;
     std::array<Slider,6> knobs;std::array<Label,6> names;
