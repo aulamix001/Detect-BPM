@@ -1,0 +1,90 @@
+name: Windows VST3 candidate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'CMakeLists.txt'
+      - 'scripts/build-windows.ps1'
+      - '.github/workflows/windows-vst3.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Enable long Git paths
+        run: git config --global core.longpaths true
+      - name: Build Release x64 and run CTest
+        run: .\scripts\build-windows.ps1 -BuildOnly
+      - name: Download verified pluginval 1.0.4
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force build/validation | Out-Null
+          $zip = Join-Path $PWD 'build/validation/pluginval.zip'
+          Invoke-WebRequest 'https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_Windows.zip' -OutFile $zip
+          $expected = 'c08e61ce3b96db41636f8ec7e76f4c7e2c13ebdac7fa1b5a1f52b4f32ec715ab'
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw 'pluginval checksum mismatch'
+          }
+          Expand-Archive -LiteralPath $zip -DestinationPath build/validation
+      - name: Validate VST3 with pluginval level 5
+        run: |
+          $bundle = Join-Path $PWD 'build/windows/SmartTime_artefacts/Release/VST3/SMART TIME.vst3'
+          & .\build\validation\pluginval.exe --strictness-level 5 --validate $bundle --headless --timeout-ms 180000 --output-dir .\build\validation
+          if ($LASTEXITCODE -ne 0) { throw "pluginval failed: $LASTEXITCODE" }
+      - name: Package candidate without installing it
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundle = Join-Path $PWD 'build/windows/SmartTime_artefacts/Release/VST3/SMART TIME.vst3'
+          $module = Join-Path $bundle 'Contents/x86_64-win/SMART TIME.vst3'
+          if (!(Test-Path $module)) { throw 'Windows x64 VST3 module missing' }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $notes = @(
+            'CHi SMART TIME 0.1.0 - Windows x64 test candidate',
+            "Source commit: $env:GITHUB_SHA",
+            'Built with MSVC on windows-2022. CTest and pluginval level 5 passed.',
+            'Not yet verified in Studio One. This is not a production release.',
+            'Includes offline correction and user-controlled live analysis (no live correction).',
+            'Keep the entire SMART TIME.vst3 folder, including Contents.',
+            'No automatic installation was performed.',
+            'JUCE/Rubber Band licensing information: see source repository documentation.'
+          )
+          $notes | Set-Content dist/CANDIDATE.txt
+          $hash = (Get-FileHash $module -Algorithm SHA256).Hash
+          "$hash  Contents/x86_64-win/SMART TIME.vst3" | Set-Content dist/SHA256.txt
+          Copy-Item -LiteralPath $bundle -Destination dist -Recurse
+          Compress-Archive -LiteralPath 'dist/SMART TIME.vst3','dist/CANDIDATE.txt','dist/SHA256.txt' -DestinationPath dist/CHi-SMART-TIME-Windows-x64-candidate.zip
+      - name: Upload candidate
+        id: candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: CHi-SMART-TIME-Windows-x64-candidate
+          path: dist/CHi-SMART-TIME-Windows-x64-candidate.zip
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download link
+        run: |
+          "Windows VST3 candidate: ${{ steps.candidate.outputs.artifact-url }}" | Add-Content $env:GITHUB_STEP_SUMMARY
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Windows-validation-logs
+          path: |
+            build/windows/Testing/Temporary/*.log
+            build/validation/*.txt
+            build/validation/*.xml
+            build/validation/*.log
+          if-no-files-found: ignore
+          retention-days: 30
