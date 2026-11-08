@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "VuMeter.h"
 #include "../ui/Theme.h"
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <array>
@@ -43,7 +44,7 @@ public:
     AudioProcessorValueTreeState params;
     std::atomic<unsigned> version{1};
     std::atomic<bool> busy{false}, playing{false}, useB{false};
-    std::atomic<float> inputPeak{0},outputPeak{0};
+    chi::VuMeter inputVu,outputVu;
     std::atomic<double> rate{48000}, hostBpm{0};
     void stopPreview() noexcept {++transportVersion;playing=false;}
     Snapshot snapshot() {std::lock_guard<std::mutex> lock(sessionMutex);return session;}
@@ -131,7 +132,7 @@ public:
         });
     }
     void cancel() {stopPreview();std::lock_guard<std::mutex> lock(jobMutex);if(token)token->requested=true;}
-    void prepareToPlay(double sr,int) override {rate=sr;stopPreview();}
+    void prepareToPlay(double sr,int) override {rate=sr;stopPreview();inputVu.prepare(sr);outputVu.prepare(sr);}
     void releaseResources() override {stopPreview();}
     bool isBusesLayoutSupported(const BusesLayout& b) const override {
         return b.getMainInputChannelSet()==b.getMainOutputChannelSet()
@@ -139,7 +140,7 @@ public:
     }
     void processBlock(AudioBuffer<float>& buffer,MidiBuffer&) override {
         ScopedNoDenormals noDenormals;
-        float in=0;for(int c=0;c<buffer.getNumChannels();++c)in=std::max(in,buffer.getMagnitude(c,0,buffer.getNumSamples()));inputPeak=in;
+        inputVu.process(buffer.getArrayOfReadPointers(),buffer.getNumChannels(),buffer.getNumSamples());
         double bpm=0;
         if(auto* ph=getPlayHead())if(auto pos=ph->getPosition())if(auto tempo=pos->getBpm())if(*tempo>=30&&*tempo<=300)bpm=*tempo;
         hostBpm=bpm;
@@ -161,7 +162,7 @@ public:
                 if(position<active->original.frames())++position;else playing=false;
             }
         } else if(playing) playing=false;
-        float out=0;for(int c=0;c<buffer.getNumChannels();++c)out=std::max(out,buffer.getMagnitude(c,0,buffer.getNumSamples()));outputPeak=out;
+        outputVu.process(buffer.getArrayOfReadPointers(),buffer.getNumChannels(),buffer.getNumSamples());
     }
     const String getName() const override {return "SMART TIME";}
     bool acceptsMidi() const override{return false;} bool producesMidi() const override{return false;}
@@ -277,7 +278,7 @@ public:
         addAndMakeVisible(source);source.addItemList({"BPM fixo","BPM detectado","BPM da DAW"},1);
         gridAttach=std::make_unique<ComboAttachment>(p.params,"grid",grid);sourceAttach=std::make_unique<ComboAttachment>(p.params,"source",source);
         addAndMakeVisible(status);status.setColour(Label::textColourId,chi::Theme::muted);
-        setResizable(true,true);setResizeLimits(900,680,1500,1000);setSize(1050,700);startTimerHz(20);
+        setResizable(true,true);setResizeLimits(900,680,1500,1000);setSize(1050,700);startTimerHz(40);
     }
     ~Editor() override {stopTimer();setLookAndFeel(nullptr);}
     void resized() override {
@@ -297,7 +298,7 @@ public:
         g.setColour(chi::Theme::text);g.setFont(FontOptions(32,Font::bold));g.drawText("CHi",0,30,getWidth(),36,Justification::centred);
         g.setFont(FontOptions(25,Font::italic));g.drawText("SMART TIME",0,66,getWidth(),30,Justification::centred);
         g.setFont(FontOptions(12));g.drawText("INTELLIGENT TIME CORRECTION  |  0.1.0 - DEVELOPMENT",0,98,getWidth(),20,Justification::centred);
-        meter(g,{40,45,160,60},inPeak,"IN");meter(g,{getWidth()-200,45,160,60},outPeak,"OUT");
+        meter(g,{40,30,190,88},inVu,p.inputVu,"IN");meter(g,{getWidth()-230,30,190,88},outVu,p.outputVu,"OUT");
         g.setColour(chi::Theme::well);g.fillRect(wave);g.setColour(chi::Theme::accent);g.drawRect(wave);
         const auto clip=p.useB&&snap.corrected&&snap.renderVersion==p.version.load()?snap.corrected:snap.original;
         if(!clip)return;
@@ -329,20 +330,36 @@ private:
         String text=p.busy?"Processando... Cancelar disponivel":snap.message;
         if(snap.analysis.bpm>0)text+=" | BPM "+String(snap.analysis.bpm,2)+" / confianca "+String(snap.analysis.confidence*100,0)+"%";
         text+=" | Ataques: "+String(static_cast<int>(snap.analysis.attacks.size()));status.setText(text,dontSendNotification);
-        inPeak=std::max(p.inputPeak.load(),inPeak*.86f);outPeak=std::max(p.outputPeak.load(),outPeak*.86f);repaint();
+        const double now=Time::getMillisecondCounterHiRes();
+        const float smooth=static_cast<float>(1-std::exp(-std::min(.2,(now-lastMeterTime)/1000)/.025));lastMeterTime=now;
+        inVu+=smooth*(vu(p.inputVu.rms.load())-inVu);outVu+=smooth*(vu(p.outputVu.rms.load())-outVu);repaint();
     }
     void choose(bool save) {
         chooser=std::make_unique<FileChooser>(save?"Exportar WAV":"Importar WAV",File{},"*.wav");
         Component::SafePointer<Editor> safe(this);
         chooser->launchAsync(save?(FileBrowserComponent::saveMode|FileBrowserComponent::canSelectFiles|FileBrowserComponent::warnAboutOverwriting):(FileBrowserComponent::openMode|FileBrowserComponent::canSelectFiles),[safe,save](const FileChooser& fc){if(safe){const auto file=fc.getResult();if(file!=File{}){if(save)safe->p.exportFile(file);else safe->p.importFile(file);}}});
     }
-    static void meter(Graphics& g,Rectangle<int> box,float peak,const char* name) {
-        g.setColour(chi::Theme::well);g.fillRoundedRectangle(box.toFloat(),5);g.setColour(chi::Theme::text);g.setFont(FontOptions(12));g.drawText(name,box.removeFromBottom(18),Justification::centred);
-        const auto center=box.getBottomLeft().toFloat()+Point<float>(box.getWidth()*.5f,0);
-        const float angle=-2.8f+std::clamp((Decibels::gainToDecibels(peak,-60.0f)+60)/60,0.0f,1.0f)*2.45f;
-        g.setColour(chi::Theme::needle);g.drawLine(center.x,center.y,center.x+std::cos(angle)*box.getWidth()*.4f,center.y+std::sin(angle)*box.getHeight()*.9f,2);
+    static float vu(float rms) {return std::clamp(Decibels::gainToDecibels(rms,-80.0f)+18,-20.0f,3.0f);}
+    static void meter(Graphics& g,Rectangle<int> box,float value,const chi::VuMeter& level,const char* name) {
+        g.setColour(chi::Theme::well);g.fillRoundedRectangle(box.toFloat(),10);
+        g.setColour(chi::Theme::border);g.drawRoundedRectangle(box.toFloat().reduced(.5f),10,1);
+        const float cx=box.getCentreX(),cy=box.getY()+62.0f,radius=43;
+        auto angle=[](float v){return -2.9f+(v+20)/23*2.66f;};
+        g.setFont(FontOptions(10));
+        for(float tick:{-20.0f,-10.0f,-5.0f,0.0f,3.0f}) {
+            const auto a=angle(tick);g.setColour(tick>=0?chi::Theme::accent:chi::Theme::muted);
+            g.drawLine(cx+std::cos(a)*radius,cy+std::sin(a)*radius,cx+std::cos(a)*(radius-5),cy+std::sin(a)*(radius-5));
+            g.drawText(String(tick,0),static_cast<int>(cx+std::cos(a)*(radius+13)-12),static_cast<int>(cy+std::sin(a)*(radius+13)-5),24,12,Justification::centred);
+        }
+        const auto a=angle(value);g.setColour(chi::Theme::needle);
+        g.drawLine(cx,cy,cx+std::cos(a)*(radius-7),cy+std::sin(a)*(radius-7),2);
+        g.setColour(level.clip.load()?chi::Theme::clip:chi::Theme::border);g.fillEllipse(box.getRight()-14.0f,box.getY()+7.0f,7,7);
+        g.setColour(chi::Theme::text);g.setFont(FontOptions(11));
+        g.drawText(String(name)+"  VU / 0 = -18 dBFS",box.withTop(box.getY()+65).withHeight(12),Justification::centred);
+        g.setColour(chi::Theme::muted);g.setFont(FontOptions(9));
+        g.drawText("Peak "+String(Decibels::gainToDecibels(level.peak.load(),-80.0f),1)+" dBFS",box.withTop(box.getY()+77).withHeight(10),Justification::centred);
     }
-    Processor& p;Snapshot snap;chi::SmartLookAndFeel look;Rectangle<int> wave;float inPeak=0,outPeak=0;
+    Processor& p;Snapshot snap;chi::SmartLookAndFeel look;Rectangle<int> wave;float inVu=-20,outVu=-20;double lastMeterTime=Time::getMillisecondCounterHiRes();
     TextButton open{"Abrir WAV"},detect{"Detectar BPM"},render{"Corrigir"},play{"Play"},stop{"Stop"},exportWav{"Exportar WAV"},cancel{"Cancelar"},future{"Tempo real - futuro"};
     ToggleButton ab,pitch,protect;ComboBox grid,source;Label status;
     std::array<Slider,6> knobs;std::array<Label,6> names;
