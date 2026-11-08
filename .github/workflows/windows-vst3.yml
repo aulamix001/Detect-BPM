@@ -40,9 +40,19 @@ jobs:
           Expand-Archive -LiteralPath $zip -DestinationPath build/validation
       - name: Validate VST3 with pluginval level 5
         run: |
+          $ErrorActionPreference = 'Stop'
           $bundle = Join-Path $PWD 'build/windows/SmartTime_artefacts/Release/VST3/SMART TIME.vst3'
-          & .\build\validation\pluginval.exe --strictness-level 5 --validate $bundle --headless --timeout-ms 180000 --output-dir .\build\validation
-          if ($LASTEXITCODE -ne 0) { throw "pluginval failed: $LASTEXITCODE" }
+          $out = Join-Path $PWD 'build/validation'
+          $exe = Join-Path $out 'pluginval.exe'
+          $arguments = '--strictness-level 5 --validate "{0}" --timeout-ms 180000 --output-dir "{1}"' -f $bundle, $out
+          $process = Start-Process -FilePath $exe -ArgumentList $arguments -Wait -PassThru -NoNewWindow -RedirectStandardOutput "$out/stdout.log" -RedirectStandardError "$out/stderr.log"
+          Get-Content "$out/stdout.log", "$out/stderr.log" | Write-Output
+          if ($process.ExitCode -ne 0) {
+            $tail = ((Get-Content "$out/stdout.log", "$out/stderr.log" -Tail 60) -join "`n")
+            $message = "Exit code $($process.ExitCode): $tail".Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+            Write-Host "::error title=pluginval diagnostic::$message"
+            throw "pluginval failed: $($process.ExitCode)"
+          }
       - name: Package candidate without installing it
         run: |
           $ErrorActionPreference = 'Stop'
