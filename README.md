@@ -27,6 +27,19 @@ O fluxo principal será importar um WAV, analisar ataques, construir e editar a
 grade, renderizar a correção, comparar original/corrigido e exportar WAV.
 Correção da entrada em tempo real pertence a uma versão posterior.
 
+## Analise ao vivo (atualizacao)
+
+Com a entrada de audio monitorada na DAW, inicie o transporte e ligue **Analisar**.
+O audio passa sem alteracao; FFT e estimativa de BPM rodam numa thread separada.
+A UI mostra BPM estimado, confianca, BPM/PPQ do host e os desvios dos ultimos
+ataques em ms. Enquanto a confianca for menor que 65%, mostra `Analisando...`.
+Desligar o toggle mantem o ultimo resultado visivel. O estado do toggle e os
+parametros da grade sao salvos com a sessao.
+
+**BPM do WAV** e **Corrigir** operam no arquivo importado; nao corrigem a entrada
+ao vivo. Captura e lookahead ficaram fora desta etapa conforme o pedido final.
+Veja [arquitetura, testes e limitacoes desta revisao](docs/ANALISE-AO-VIVO.md).
+
 ## Compilar no Windows
 
 Pré-requisitos: Windows x64, Visual Studio 2022 com **Desktop development with

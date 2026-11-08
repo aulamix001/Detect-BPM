@@ -3,21 +3,46 @@
 #include <stdexcept>
 #include <iostream>
 #include "Engine.h"
+#include "AllocationGuard.h"
 #include <thread>
 #include <chrono>
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter();
+class FakePlayHead final : public juce::AudioPlayHead {
+public:
+    juce::Optional<PositionInfo> getPosition() const override {
+        PositionInfo info;info.setBpm(120);info.setPpqPosition(8);info.setIsPlaying(true);return info;
+    }
+};
 int main() {
     try {
         juce::ScopedJuceInitialiser_GUI init;
         for(int cycle=0;cycle<100;++cycle) {
-            std::unique_ptr<juce::AudioProcessor> p(createPluginFilter());
+            FakePlayHead host;
+            std::unique_ptr<juce::AudioProcessor> p(createPluginFilter());p->setPlayHead(&host);
             {std::unique_ptr<juce::AudioProcessorEditor> e(p->createEditor());e->setSize(1000,700);}
             juce::MemoryBlock state;p->getStateInformation(state);p->setStateInformation(state.getData(),static_cast<int>(state.getSize()));
             for(double rate:{44100.0,48000.0,96000.0})for(int block:{32,64,256,1024}) {
                 p->setRateAndBufferSizeDetails(rate,block);p->prepareToPlay(rate,block);
                 juce::AudioBuffer<float> audio(2,block);audio.clear();audio.setSample(0,0,.5f);juce::MidiBuffer midi;
-                p->processBlock(audio,midi);
+                test_rt::Guard guard;p->processBlock(audio,midi);
+                if(guard.finish()!=0)throw std::runtime_error("Allocation/deallocation in idle callback");
                 if(audio.getSample(0,0)!=.5f)throw std::runtime_error("Idle pass-through failed");
+                juce::AudioProcessorParameter* toggle=nullptr;
+                for(auto* parameter:p->getParameters())if(auto* withId=dynamic_cast<juce::AudioProcessorParameterWithID*>(parameter))
+                    if(withId->paramID=="analyseLive")toggle=parameter;
+                if(!toggle)throw std::runtime_error("Analisar parameter absent");
+                toggle->setValueNotifyingHost(1);
+                for(int ch=0;ch<2;++ch)for(int i=0;i<block;++i)audio.setSample(ch,i,static_cast<float>(std::sin(i*.07+ch)*.3));
+                test_rt::Guard liveGuard;p->processBlock(audio,midi);
+                if(liveGuard.finish()!=0)throw std::runtime_error("Allocation/deallocation in live callback");
+                for(int ch=0;ch<2;++ch)for(int i=0;i<block;++i)
+                    if(audio.getSample(ch,i)!=static_cast<float>(std::sin(i*.07+ch)*.3))throw std::runtime_error("Live analysis altered audio");
+                if(cycle==0&&rate==44100&&block==32) {
+                    juce::MemoryBlock saved;p->getStateInformation(saved);toggle->setValueNotifyingHost(0);
+                    p->setStateInformation(saved.getData(),static_cast<int>(saved.getSize()));
+                    if(toggle->getValue()<.5f)throw std::runtime_error("Analisar state did not restore");
+                }
+                toggle->setValueNotifyingHost(0);
                 p->releaseResources();
             }
         }
@@ -56,6 +81,6 @@ int main() {
             e.reset();p.reset();
         }
         std::filesystem::remove(wav);
-        std::cout<<"PASS 100 processor/editor/state cycles; 1200 rate/buffer combinations; 10 pending render/cancel destructions\n";return 0;
+        std::cout<<"PASS allocation-free/bit-exact live callbacks; 100 processor/editor/state cycles; 1200 rate/buffer combinations; 10 pending render/cancel destructions\n";return 0;
     } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

@@ -1,5 +1,6 @@
 #include "Engine.h"
 #include "VuMeter.h"
+#include "RealtimeAnalyser.h"
 #include "../ui/Theme.h"
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <array>
@@ -34,6 +35,7 @@ public:
     Processor() : AudioProcessor(BusesProperties().withInput("Input",AudioChannelSet::stereo(),true)
                   .withOutput("Output",AudioChannelSet::stereo(),true)), params(*this,nullptr,"SMART_TIME",layout()) {
         for(const char* id:ids)params.addParameterListener(id,this);
+        liveGrid=params.getRawParameterValue("grid");liveSwing=params.getRawParameterValue("swing");liveOffset=params.getRawParameterValue("offset");
         worker=std::thread([this]{run();});
     }
     ~Processor() override {
@@ -45,6 +47,7 @@ public:
     std::atomic<unsigned> version{1};
     std::atomic<bool> busy{false}, playing{false}, useB{false};
     chi::VuMeter inputVu,outputVu;
+    chi::RealtimeAnalyser live;
     std::atomic<double> rate{48000}, hostBpm{0};
     void stopPreview() noexcept {++transportVersion;playing=false;}
     Snapshot snapshot() {std::lock_guard<std::mutex> lock(sessionMutex);return session;}
@@ -97,6 +100,7 @@ public:
         });
     }
     void preview() {
+        if(live.isEnabled()){message("Desative Analisar para ouvir o WAV");return;}
         stopPreview();const auto transport=transportVersion.load();
         auto snap=snapshot();if(!snap.original)return;
         const auto v=version.load();if(useB&&(!snap.corrected||snap.renderVersion!=v)){message("Renderize a correcao atual antes de tocar B");return;}
@@ -132,7 +136,7 @@ public:
         });
     }
     void cancel() {stopPreview();std::lock_guard<std::mutex> lock(jobMutex);if(token)token->requested=true;}
-    void prepareToPlay(double sr,int) override {rate=sr;stopPreview();inputVu.prepare(sr);outputVu.prepare(sr);}
+    void prepareToPlay(double sr,int) override {rate=sr;stopPreview();inputVu.prepare(sr);outputVu.prepare(sr);live.reset();wasLiveRunning=false;}
     void releaseResources() override {stopPreview();}
     bool isBusesLayoutSupported(const BusesLayout& b) const override {
         return b.getMainInputChannelSet()==b.getMainOutputChannelSet()
@@ -141,9 +145,24 @@ public:
     void processBlock(AudioBuffer<float>& buffer,MidiBuffer&) override {
         ScopedNoDenormals noDenormals;
         inputVu.process(buffer.getArrayOfReadPointers(),buffer.getNumChannels(),buffer.getNumSamples());
-        double bpm=0;
-        if(auto* ph=getPlayHead())if(auto pos=ph->getPosition())if(auto tempo=pos->getBpm())if(*tempo>=30&&*tempo<=300)bpm=*tempo;
+        double bpm=0,ppq=0;bool hostPlaying=false,hasPpq=false;
+        if(auto* ph=getPlayHead())if(auto pos=ph->getPosition()) {
+            if(auto tempo=pos->getBpm())if(std::isfinite(*tempo)&&*tempo>=30&&*tempo<=300)bpm=*tempo;
+            if(auto positionPpq=pos->getPpqPosition())if(std::isfinite(*positionPpq)){ppq=*positionPpq;hasPpq=true;}
+            hostPlaying=pos->getIsPlaying();
+        }
         hostBpm=bpm;
+        const bool analysing=live.isEnabled(),running=analysing&&hostPlaying;
+        if(running) {
+            chi::HostTiming timing;timing.sampleRate=rate.load();timing.bpm=bpm;timing.ppq=ppq;
+            timing.gridValid=hasPpq&&bpm>0;
+            timing.stepBeats=4.0/(4<<static_cast<int>(liveGrid->load()));
+            timing.swing=liveSwing->load()/100.0;
+            timing.offsetSeconds=liveOffset->load()/1000.0;
+            timing.reset=!wasLiveRunning;
+            live.push(buffer.getArrayOfReadPointers(),buffer.getNumChannels(),buffer.getNumSamples(),timing);
+        }
+        wasLiveRunning=running;
         for(auto& slot:slots) {
             int expected=Preview::ready;
             if(slot.state.compare_exchange_strong(expected,Preview::reading,std::memory_order_acquire)) {
@@ -151,7 +170,7 @@ public:
                 active=&slot;position=0;blend=useB?1.0f:0.0f;
             }
         }
-        if(playing&&active&&active->version==version.load()&&active->transport==transportVersion.load()&&active->original.sampleRate==rate.load()) {
+        if(!analysing&&playing&&active&&active->version==version.load()&&active->transport==transportVersion.load()&&active->original.sampleRate==rate.load()) {
             const float target=useB?1.0f:0.0f,delta=1.0f/240.0f;
             for(int i=0;i<buffer.getNumSamples();++i) {
                 blend+=std::clamp(target-blend,-delta,delta);
@@ -201,7 +220,7 @@ private:
         }
         return peaks;
     }
-    inline static constexpr std::array<const char*,10> ids{"bpm","strength","natural","swing","grid","meter","pitch","protect","source","offset"};
+    inline static constexpr std::array<const char*,11> ids{"bpm","strength","natural","swing","grid","meter","pitch","protect","source","offset","analyseLive"};
     static AudioProcessorValueTreeState::ParameterLayout layout() {
         AudioProcessorValueTreeState::ParameterLayout p;
         p.add(std::make_unique<AudioParameterFloat>(ParameterID{"bpm",1},"BPM fixo",NormalisableRange<float>(30,300,.01f),120));
@@ -214,9 +233,13 @@ private:
         p.add(std::make_unique<AudioParameterBool>(ParameterID{"pitch",1},"Preservar afinacao",true));
         p.add(std::make_unique<AudioParameterBool>(ParameterID{"protect",1},"Proteger transientes",true));
         p.add(std::make_unique<AudioParameterChoice>(ParameterID{"source",1},"Referencia BPM",StringArray{"BPM fixo","BPM detectado","BPM da DAW"},0));
+        p.add(std::make_unique<AudioParameterBool>(ParameterID{"analyseLive",1},"Analisar ao vivo",false));
         return p;
     }
-    void parameterChanged(const String&,float) override {++version;stopPreview();}
+    void parameterChanged(const String& id,float value) override {
+        if(id=="analyseLive"){live.setEnabled(value>.5f);if(value>.5f)stopPreview();return;}
+        ++version;stopPreview();
+    }
     void message(String s) {std::lock_guard<std::mutex> lock(sessionMutex);session.message=std::move(s);}
     static chi::AudioClip resample(const chi::AudioClip& source,double sr,const chi::Cancellation& cancel) {
         if(sr==source.sampleRate)return source;
@@ -246,20 +269,23 @@ private:
             {std::lock_guard<std::mutex> lock(jobMutex);if(!pending)busy=false;}
         }
     }
+    std::atomic<float>* liveGrid=nullptr;std::atomic<float>* liveSwing=nullptr;std::atomic<float>* liveOffset=nullptr;
     std::atomic<bool> workerError{false};std::atomic<unsigned> transportVersion{0};
     Snapshot session;std::mutex sessionMutex,jobMutex,restoreMutex;
     std::condition_variable changed;std::thread worker;bool stopping=false;Task pending;
     std::shared_ptr<chi::Cancellation> token;String restorePath;
-    std::array<Preview,3> slots;Preview* active=nullptr;std::size_t position=0;float blend=0;
+    std::array<Preview,3> slots;Preview* active=nullptr;std::size_t position=0;float blend=0;bool wasLiveRunning=false;
 };
 
 class Editor final : public AudioProcessorEditor,private Timer {
 public:
     explicit Editor(Processor& processor) : AudioProcessorEditor(processor),p(processor) {
         setLookAndFeel(&look);
-        for(auto* b:{&open,&detect,&render,&play,&stop,&exportWav,&cancel,&future})addAndMakeVisible(b);
+        for(auto* b:{&open,&detect,&render,&play,&stop,&exportWav,&cancel})addAndMakeVisible(b);
         render.getProperties().set("primary",true);exportWav.getProperties().set("primary",true);
-        future.setEnabled(false);
+        addAndMakeVisible(analyseToggle);analyseToggle.setButtonText("Analisar");analyseToggle.setClickingTogglesState(true);
+        analyseAttachment=std::make_unique<ButtonAttachment>(p.params,"analyseLive",analyseToggle);
+        addAndMakeVisible(liveInfo);liveInfo.setColour(Label::textColourId,chi::Theme::text);liveInfo.setFont(FontOptions(13));
         open.onClick=[this]{choose(false);};detect.onClick=[this]{p.analyseFile();};render.onClick=[this]{p.renderFile();};
         play.onClick=[this]{p.preview();};stop.onClick=[this]{p.stopPreview();};cancel.onClick=[this]{p.cancel();};exportWav.onClick=[this]{choose(true);};
         addAndMakeVisible(ab);ab.setButtonText("B corrigido (A original desligado)");ab.onClick=[this]{p.useB=ab.getToggleState();};
@@ -278,18 +304,19 @@ public:
         addAndMakeVisible(source);source.addItemList({"BPM fixo","BPM detectado","BPM da DAW"},1);
         gridAttach=std::make_unique<ComboAttachment>(p.params,"grid",grid);sourceAttach=std::make_unique<ComboAttachment>(p.params,"source",source);
         addAndMakeVisible(status);status.setColour(Label::textColourId,chi::Theme::muted);
-        setResizable(true,true);setResizeLimits(900,680,1500,1000);setSize(1050,700);startTimerHz(40);
+        setResizable(true,true);setResizeLimits(900,760,1500,1100);setSize(1050,820);startTimerHz(30);
     }
     ~Editor() override {stopTimer();setLookAndFeel(nullptr);}
     void resized() override {
         auto r=getLocalBounds().reduced(30);r.removeFromTop(110);
         auto buttons=r.removeFromTop(34);
         for(auto* b:{&open,&detect,&render,&play,&stop,&exportWav,&cancel})b->setBounds(buttons.removeFromLeft(buttons.getWidth()/(b==&cancel?1:b==&exportWav?2:b==&stop?3:b==&play?4:b==&render?5:b==&detect?6:7)).reduced(2));
-        r.removeFromTop(10);wave=r.removeFromTop(std::max(150,getHeight()/3));r.removeFromTop(10);
-        auto selectors=r.removeFromTop(30);source.setBounds(selectors.removeFromLeft(180).reduced(2));grid.setBounds(selectors.removeFromLeft(100).reduced(2));ab.setBounds(selectors.removeFromLeft(300));
+        r.removeFromTop(8);liveInfo.setBounds(r.removeFromTop(72));r.removeFromTop(8);
+        wave=r.removeFromTop(std::max(100,r.getHeight()-241));r.removeFromTop(8);
+        auto selectors=r.removeFromTop(30);source.setBounds(selectors.removeFromLeft(180).reduced(2));grid.setBounds(selectors.removeFromLeft(100).reduced(2));analyseToggle.setBounds(selectors.removeFromLeft(120));ab.setBounds(selectors.removeFromLeft(300));
         auto controls=r.removeFromTop(125);const auto width=controls.getWidth()/6;
         for(std::size_t i=0;i<knobs.size();++i){auto c=controls.removeFromLeft(width);names[i].setBounds(c.removeFromTop(24));knobs[i].setBounds(c);}
-        auto toggles=r.removeFromTop(28);pitch.setBounds(toggles.removeFromLeft(200));protect.setBounds(toggles.removeFromLeft(200));future.setBounds(toggles);
+        auto toggles=r.removeFromTop(28);pitch.setBounds(toggles.removeFromLeft(200));protect.setBounds(toggles.removeFromLeft(200));
         status.setBounds(r);
     }
     void paint(Graphics& g) override {
@@ -297,11 +324,25 @@ public:
         g.setColour(chi::Theme::border);g.drawRoundedRectangle(getLocalBounds().reduced(18).toFloat(),chi::Theme::radius,1);
         g.setColour(chi::Theme::text);g.setFont(FontOptions(32,Font::bold));g.drawText("CHi",0,30,getWidth(),36,Justification::centred);
         g.setFont(FontOptions(25,Font::italic));g.drawText("SMART TIME",0,66,getWidth(),30,Justification::centred);
-        g.setFont(FontOptions(12));g.drawText("INTELLIGENT TIME CORRECTION  |  0.1.0 - DEVELOPMENT",0,98,getWidth(),20,Justification::centred);
+        g.setFont(FontOptions(12));g.drawText("INTELLIGENT TIME CORRECTION  |  OFFLINE + ANALISE AO VIVO",0,98,getWidth(),20,Justification::centred);
         meter(g,{40,30,190,88},inVu,p.inputVu,"IN");meter(g,{getWidth()-230,30,190,88},outVu,p.outputVu,"OUT");
         g.setColour(chi::Theme::well);g.fillRect(wave);g.setColour(chi::Theme::accent);g.drawRect(wave);
         const auto clip=p.useB&&snap.corrected&&snap.renderVersion==p.version.load()?snap.corrected:snap.original;
-        if(!clip)return;
+        if(!clip) {
+            g.setColour(chi::Theme::muted);g.setFont(FontOptions(14));
+            g.drawText("Desvios dos ultimos ataques | centro = grade do host",wave.reduced(12).removeFromTop(24),Justification::centred);
+            const int centre=wave.getCentreX();g.setColour(chi::Theme::border);
+            g.drawVerticalLine(centre,static_cast<float>(wave.getY()+40),static_cast<float>(wave.getBottom()-12));
+            const double range=liveResult.hostBpm>0?std::max(20.0,30000/liveResult.hostBpm):100;
+            const float row=(wave.getHeight()-52.0f)/16;
+            for(unsigned i=0;i<liveResult.count;++i)if(std::isfinite(liveResult.deviationsMs[i])) {
+                const float y=wave.getY()+40+row*i,x=centre+static_cast<float>(std::clamp(liveResult.deviationsMs[i]/range,-1.0,1.0))*(wave.getWidth()*.35f);
+                g.setColour(chi::Theme::accent);g.drawLine(static_cast<float>(centre),y,x,y,2);g.fillEllipse(x-3,y-3,6,6);
+                g.setColour(chi::Theme::text);g.setFont(FontOptions(11));
+                g.drawText(String(liveResult.deviationsMs[i],1)+" ms",wave.getX()+8,static_cast<int>(y-6),100,14,Justification::centredLeft);
+            }
+            return;
+        }
         const double frames=static_cast<double>(clip->frames());
         double bpm=120;chi::Settings s;try{s=p.settings();bpm=s.bpm;}catch(...){}
         if(p.params.getRawParameterValue("source")->load()==1&&snap.analysis.bpm>0)bpm=snap.analysis.bpm;
@@ -325,8 +366,21 @@ private:
     using ComboAttachment=AudioProcessorValueTreeState::ComboBoxAttachment;
     void timerCallback() override {
         p.restorePending();snap=p.snapshot();const bool idle=!p.busy.load(),has=static_cast<bool>(snap.original),corrected=snap.corrected&&snap.renderVersion==p.version.load();
-        open.setEnabled(idle);detect.setEnabled(idle&&has);render.setEnabled(idle&&has);play.setEnabled(idle&&has);exportWav.setEnabled(idle&&corrected);cancel.setEnabled(!idle);ab.setEnabled(corrected);if(!corrected){ab.setToggleState(false,dontSendNotification);p.useB=false;}
+        open.setEnabled(idle);detect.setEnabled(idle&&has);render.setEnabled(idle&&has);play.setEnabled(idle&&has&&!p.live.isEnabled());exportWav.setEnabled(idle&&corrected);cancel.setEnabled(!idle);ab.setEnabled(corrected);if(!corrected){ab.setToggleState(false,dontSendNotification);p.useB=false;}
         source.setItemEnabled(3,p.hostBpm.load()>0);
+        if(p.live.isEnabled()||!liveReadOnce){if(p.live.read(liveResult))liveReadOnce=true;}
+        const bool enabled=p.live.isEnabled();
+        const String detected=liveResult.confidence>=.65?String(liveResult.bpm,2)+" BPM":(enabled?String("Analisando..."):String("sem estimativa confiavel"));
+        String liveText=enabled?"Analisar: ATIVO  |  ":"Analisar: pausado (ultimo resultado)  |  ";
+        liveText+=detected+"  |  Confianca "+String(liveResult.confidence*100,0)+"%";
+        const double hb=enabled?p.hostBpm.load():liveResult.hostBpm;
+        liveText+="  |  Host "+(hb>0?String(hb,2):String("indisponivel"))+" BPM";
+        liveText+="\nAtaques / desvio da grade em ms (+ atrasado, - adiantado): ";
+        for(unsigned i=0;i<liveResult.count;++i)liveText+=String(static_cast<int>(i+1))+": "+(std::isfinite(liveResult.deviationsMs[i])?String(liveResult.deviationsMs[i],1):String("--"))+"  ";
+        if(liveResult.count==0)liveText+="aguardando audio e transporte da DAW";
+        liveText+="\nPPQ "+String(liveResult.hostPpq,2)+" | Janela "+String(liveResult.seconds,1)+"s | Pacotes perdidos "+String(liveResult.dropped);
+        if(liveResult.error)liveText+=" | Falha na analise; reinicie Analisar";
+        liveInfo.setText(liveText,dontSendNotification);
         String text=p.busy?"Processando... Cancelar disponivel":snap.message;
         if(snap.analysis.bpm>0)text+=" | BPM "+String(snap.analysis.bpm,2)+" / confianca "+String(snap.analysis.confidence*100,0)+"%";
         text+=" | Ataques: "+String(static_cast<int>(snap.analysis.attacks.size()));status.setText(text,dontSendNotification);
@@ -360,8 +414,9 @@ private:
         g.drawText("Peak "+String(Decibels::gainToDecibels(level.peak.load(),-80.0f),1)+" dBFS",box.withTop(box.getY()+77).withHeight(10),Justification::centred);
     }
     Processor& p;Snapshot snap;chi::SmartLookAndFeel look;Rectangle<int> wave;float inVu=-20,outVu=-20;double lastMeterTime=Time::getMillisecondCounterHiRes();
-    TextButton open{"Abrir WAV"},detect{"Detectar BPM"},render{"Corrigir"},play{"Play"},stop{"Stop"},exportWav{"Exportar WAV"},cancel{"Cancelar"},future{"Tempo real - futuro"};
-    ToggleButton ab,pitch,protect;ComboBox grid,source;Label status;
+    TextButton open{"Abrir WAV"},detect{"BPM do WAV"},render{"Corrigir"},play{"Play"},stop{"Stop"},exportWav{"Exportar WAV"},cancel{"Cancelar"};
+    TextButton analyseToggle{"Analisar"};ToggleButton ab,pitch,protect;ComboBox grid,source;Label status,liveInfo;
+    chi::LiveResult liveResult;bool liveReadOnce=false;std::unique_ptr<ButtonAttachment> analyseAttachment;
     std::array<Slider,6> knobs;std::array<Label,6> names;
     std::array<std::unique_ptr<SliderAttachment>,6> attachments;
     std::unique_ptr<ButtonAttachment> pitchAttach,protectAttach;

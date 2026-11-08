@@ -1,5 +1,8 @@
 # CHi SMART TIME 0.1.0 — resultado do desenvolvimento
 
+A revisao posterior de tema/VU/analise ao vivo esta descrita em
+[ANALISE-AO-VIVO.md](ANALISE-AO-VIVO.md). Os resultados abaixo sao o historico anterior.
+
 Data: 2026-11-08. **Candidato em desenvolvimento; versão 0.1 não aprovada.**
 
 ## Atualização: build no PC Windows do usuário
