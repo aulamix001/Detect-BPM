@@ -1,5 +1,9 @@
 # Revisão: tema, VUs e análise ao vivo
 
+Atualização posterior: o mesmo código foi compilado e validado no Windows pelo
+GitHub Actions. Veja [o candidato e os resultados Windows](WINDOWS-CANDIDATE.md).
+As afirmações de compilação apenas em Linux abaixo descrevem a etapa anterior.
+
 ## Leitura anterior às alterações
 
 Foram lidos todos os arquivos versionados: CMake, fontes, testes, PowerShell e

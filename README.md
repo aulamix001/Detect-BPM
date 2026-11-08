@@ -6,6 +6,10 @@ Fabricante e logotipo: **CHi**.
 
 ## Baixar o projeto
 
+**VST3 Windows x64 compilado:** [download do candidato no GitHub Actions](https://github.com/aulamix001/Detect-BPM/actions/runs/42520060464/artifacts/13632514687).
+Requer login no GitHub. Build/CTest e pluginval nível 5 passaram; o teste no
+Studio One continua pendente. [Detalhes e instruções de extração](docs/WINDOWS-CANDIDATE.md).
+
 [Download do projeto-fonte ZIP](https://github.com/aulamix001/Detect-BPM/archive/refs/heads/main.zip).
 Extraia o ZIP e abra a pasta que contém este README e `CMakeLists.txt`.
 Esse download contém fontes; não contém um VST3 Windows compilado.
